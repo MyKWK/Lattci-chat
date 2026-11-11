@@ -1,0 +1,11 @@
+{
+  "name": "lattci-chat",
+  "version": "0.1.0",
+  "description": "晶格 Lattice。配对设备之间发送通知、委派请求并取回回复。",
+  "mcpServers": "./.mcp.json",
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "Lattci-chat",
+    "shortDescription": "向已配对设备发送通知和 Agent 请求"
+  }
+}
