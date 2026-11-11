@@ -10994,34 +10994,42 @@ function initProfile(directory, options) {
   if (options.workspace && !(0, import_node_path.isAbsolute)(options.codex || "")) {
     throw new Error("\u542F\u7528\u81EA\u52A8\u6267\u884C\u65F6\u8BF7\u7528 --codex \u6307\u5B9A\u53EF\u6267\u884C\u6587\u4EF6\u7684\u7EDD\u5BF9\u8DEF\u5F84");
   }
-  const keyPath = (0, import_node_path.join)(directory, "identity.key");
-  const certPath = (0, import_node_path.join)(directory, "identity.crt");
-  if (!(0, import_node_fs.existsSync)(keyPath) || !(0, import_node_fs.existsSync)(certPath)) {
-    const created = (0, import_node_child_process.spawnSync)("openssl", [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-sha256",
-      "-nodes",
-      "-days",
-      "3650",
-      "-subj",
-      "/CN=Lattice",
-      "-keyout",
-      keyPath,
-      "-out",
-      certPath
-    ], { encoding: "utf8" });
-    if (created.error || created.status !== 0) throw new Error("\u9700\u8981\u53EF\u7528\u7684 OpenSSL \u751F\u6210\u8BBE\u5907\u8EAB\u4EFD");
+  const identitySource = options["identity-source"] ? (0, import_node_path.resolve)(options["identity-source"]) : null;
+  let identityId;
+  if (identitySource) {
+    identityId = embeddedIdentity(identitySource).id;
+  } else {
+    const keyPath = (0, import_node_path.join)(directory, "identity.key");
+    const certPath = (0, import_node_path.join)(directory, "identity.crt");
+    if (!(0, import_node_fs.existsSync)(keyPath) || !(0, import_node_fs.existsSync)(certPath)) {
+      const created = (0, import_node_child_process.spawnSync)("openssl", [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-sha256",
+        "-nodes",
+        "-days",
+        "3650",
+        "-subj",
+        "/CN=Lattice",
+        "-keyout",
+        keyPath,
+        "-out",
+        certPath
+      ], { encoding: "utf8" });
+      if (created.error || created.status !== 0) throw new Error("\u9700\u8981\u53EF\u7528\u7684 OpenSSL \u751F\u6210\u8BBE\u5907\u8EAB\u4EFD");
+    }
+    (0, import_node_fs.chmodSync)(keyPath, 384);
   }
-  (0, import_node_fs.chmodSync)(keyPath, 384);
   (0, import_node_fs.writeFileSync)(settings, JSON.stringify({
     localPort,
     peerPort,
     bind,
     name,
     token: (0, import_node_crypto.randomBytes)(32).toString("hex"),
+    identitySource,
+    identityId,
     codex: options.codex || "codex",
     workspace: options.workspace ? (0, import_node_path.resolve)(options.workspace) : null,
     sandbox: options["workspace-write"] ? "workspace-write" : "read-only"
@@ -11030,9 +11038,26 @@ function initProfile(directory, options) {
 }
 function readProfile(directory) {
   const settings = JSON.parse((0, import_node_fs.readFileSync)((0, import_node_path.join)(directory, "settings.json"), "utf8"));
+  if (settings.identitySource) {
+    const identity = embeddedIdentity(settings.identitySource);
+    if (identity.id !== settings.identityId) throw new Error("\u8054\u673A\u811A\u672C\u4E2D\u7684\u8BBE\u5907\u8EAB\u4EFD\u5DF2\u53D8\u66F4");
+    return { ...settings, directory, ...identity };
+  }
   const key = (0, import_node_fs.readFileSync)((0, import_node_path.join)(directory, "identity.key"));
   const cert = (0, import_node_fs.readFileSync)((0, import_node_path.join)(directory, "identity.crt"));
   return { ...settings, directory, key, cert, id: identityCode(cert) };
+}
+function embeddedIdentity(path) {
+  try {
+    const marker = "const invitationIdentity = ";
+    const line = (0, import_node_fs.readFileSync)(path, "utf8").split(/\r?\n/).find((entry) => entry.startsWith(marker));
+    if (!line?.endsWith(";")) throw new Error();
+    const { key, cert } = JSON.parse(line.slice(marker.length, -1));
+    if (!new import_node_crypto.X509Certificate(cert).checkPrivateKey((0, import_node_crypto.createPrivateKey)(key))) throw new Error();
+    return { key, cert, id: identityCode(cert) };
+  } catch {
+    throw new Error("\u65E0\u6CD5\u4ECE\u8054\u673A\u811A\u672C\u8BFB\u53D6\u8BBE\u5907\u8EAB\u4EFD\uFF0C\u8BF7\u786E\u8BA4\u539F\u6587\u4EF6\u4ECD\u5728\u9996\u6B21\u8FD0\u884C\u7684\u4F4D\u7F6E");
+  }
 }
 function port(value) {
   const parsed = Number(value);
@@ -25855,7 +25880,7 @@ var StdioServerTransport = class {
 
 // src/mcp.mjs
 async function startMcp() {
-  const mcp = new McpServer({ name: "lattice", version: "0.1.0" });
+  const mcp = new McpServer({ name: "lattci-chat", version: "0.1.1" });
   const transport = new StdioServerTransport();
   const id = (0, import_node_crypto3.randomUUID)();
   const body = external_exports.string().min(1).max(16e3);
@@ -25906,7 +25931,7 @@ async function startMcp() {
 // src/cli.mjs
 var usage = `\u6676\u683C Lattice
   init [--name NAME] [--bind IP] [--peer-port PORT] [--local-port PORT]
-       [--workspace DIR --codex ABSOLUTE_PATH] [--workspace-write]
+       [--workspace DIR --codex ABSOLUTE_PATH] [--workspace-write] [--identity-source SCRIPT]
   serve | service enable|disable|status
   identity | status | inbox | message ID | resend ID
   pair PEER_ID --name NAME [--address wss://HOST:PORT]
@@ -25927,6 +25952,7 @@ async function main() {
       workspace: { type: "string" },
       codex: { type: "string" },
       "workspace-write": { type: "boolean" },
+      "identity-source": { type: "string" },
       to: { type: "string", multiple: true },
       body: { type: "string" },
       help: { type: "boolean", short: "h" }

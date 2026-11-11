@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "lattci-chat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "晶格 Lattice。配对设备之间发送通知、委派请求并取回回复。",
   "extensions": {
     "com.openai": {

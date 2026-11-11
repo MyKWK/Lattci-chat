@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { generateKeyPairSync } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,7 +63,7 @@ test('independent WSS processes, MCP, permissions and manual resend', { timeout:
     await Promise.all([...processes].map(stop));
   });
 
-  async function create(name, runner = mock) {
+  async function create(name, runner = mock, identitySource) {
     const [local, peer] = await twoPorts();
     const env = { ...process.env, LATTICE_HOME: join(base, name) };
     const cmd = async (...args) => {
@@ -69,7 +71,8 @@ test('independent WSS processes, MCP, permissions and manual resend', { timeout:
       return JSON.parse(result.stdout);
     };
     const { id } = await cmd('init', '--name', name, '--local-port', local, '--peer-port', peer,
-      '--bind', testAddress, '--workspace', workspace, '--codex', runner);
+      '--bind', testAddress, '--workspace', workspace, '--codex', runner,
+      ...(identitySource ? ['--identity-source', identitySource] : []));
     const start = async () => {
       const child = spawn(process.execPath, [runtime, 'serve'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
       processes.add(child);
@@ -83,7 +86,18 @@ test('independent WSS processes, MCP, permissions and manual resend', { timeout:
     return { id, cmd, start, env, address: 'wss://' + testAddress + ':' + peer };
   }
 
-  const [a, b, c] = [await create('A'), await create('B'), await create('C', process.env.LATTICE_TEST_CODEX || mock)];
+  const { privateKey: key } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  const cert = spawnSync('openssl', ['req', '-x509', '-new', '-key', '/dev/stdin',
+    '-subj', '/CN=Lattice-test', '-days', '1'], { input: key, encoding: 'utf8' });
+  assert.equal(cert.status, 0);
+  const invite = join(base, 'invite.cjs');
+  await writeFile(invite, 'const invitationIdentity = ' + JSON.stringify({ key, cert: cert.stdout }) + ';\n', { mode: 0o600 });
+  const [a, b, c] = [await create('A'), await create('B', mock, invite), await create('C', process.env.LATTICE_TEST_CODEX || mock)];
+  assert.deepEqual(await readdir(b.env.LATTICE_HOME), ['settings.json']);
   await a.start();
   let bProcess = await b.start();
   await c.start();

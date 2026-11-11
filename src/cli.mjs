@@ -7,7 +7,7 @@ import { startMcp } from './mcp.mjs';
 
 const usage = `晶格 Lattice
   init [--name NAME] [--bind IP] [--peer-port PORT] [--local-port PORT]
-       [--workspace DIR --codex ABSOLUTE_PATH] [--workspace-write]
+       [--workspace DIR --codex ABSOLUTE_PATH] [--workspace-write] [--identity-source SCRIPT]
   serve | service enable|disable|status
   identity | status | inbox | message ID | resend ID
   pair PEER_ID --name NAME [--address wss://HOST:PORT]
@@ -24,6 +24,7 @@ async function main() {
       name: { type: 'string' }, bind: { type: 'string' }, address: { type: 'string' },
       'local-port': { type: 'string' }, 'peer-port': { type: 'string' },
       workspace: { type: 'string' }, codex: { type: 'string' }, 'workspace-write': { type: 'boolean' },
+      'identity-source': { type: 'string' },
       to: { type: 'string', multiple: true }, body: { type: 'string' }, help: { type: 'boolean', short: 'h' },
     },
   });

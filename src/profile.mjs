@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { createHash, randomBytes, X509Certificate } from 'node:crypto';
+import { createHash, createPrivateKey, randomBytes, X509Certificate } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -27,18 +27,25 @@ export function initProfile(directory, options) {
   if (options.workspace && !isAbsolute(options.codex || '')) {
     throw new Error('启用自动执行时请用 --codex 指定可执行文件的绝对路径');
   }
-  const keyPath = join(directory, 'identity.key');
-  const certPath = join(directory, 'identity.crt');
-  if (!existsSync(keyPath) || !existsSync(certPath)) {
-    const created = spawnSync('openssl', [
-      'req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-nodes', '-days', '3650',
-      '-subj', '/CN=Lattice', '-keyout', keyPath, '-out', certPath,
-    ], { encoding: 'utf8' });
-    if (created.error || created.status !== 0) throw new Error('需要可用的 OpenSSL 生成设备身份');
+  const identitySource = options['identity-source'] ? resolve(options['identity-source']) : null;
+  let identityId;
+  if (identitySource) {
+    identityId = embeddedIdentity(identitySource).id;
+  } else {
+    const keyPath = join(directory, 'identity.key');
+    const certPath = join(directory, 'identity.crt');
+    if (!existsSync(keyPath) || !existsSync(certPath)) {
+      const created = spawnSync('openssl', [
+        'req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-nodes', '-days', '3650',
+        '-subj', '/CN=Lattice', '-keyout', keyPath, '-out', certPath,
+      ], { encoding: 'utf8' });
+      if (created.error || created.status !== 0) throw new Error('需要可用的 OpenSSL 生成设备身份');
+    }
+    chmodSync(keyPath, 0o600);
   }
-  chmodSync(keyPath, 0o600);
   writeFileSync(settings, JSON.stringify({
     localPort, peerPort, bind, name, token: randomBytes(32).toString('hex'),
+    identitySource, identityId,
     codex: options.codex || 'codex',
     workspace: options.workspace ? resolve(options.workspace) : null,
     sandbox: options['workspace-write'] ? 'workspace-write' : 'read-only',
@@ -48,9 +55,27 @@ export function initProfile(directory, options) {
 
 export function readProfile(directory) {
   const settings = JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'));
+  if (settings.identitySource) {
+    const identity = embeddedIdentity(settings.identitySource);
+    if (identity.id !== settings.identityId) throw new Error('联机脚本中的设备身份已变更');
+    return { ...settings, directory, ...identity };
+  }
   const key = readFileSync(join(directory, 'identity.key'));
   const cert = readFileSync(join(directory, 'identity.crt'));
   return { ...settings, directory, key, cert, id: identityCode(cert) };
+}
+
+function embeddedIdentity(path) {
+  try {
+    const marker = 'const invitationIdentity = ';
+    const line = readFileSync(path, 'utf8').split(/\r?\n/).find((entry) => entry.startsWith(marker));
+    if (!line?.endsWith(';')) throw new Error();
+    const { key, cert } = JSON.parse(line.slice(marker.length, -1));
+    if (!new X509Certificate(cert).checkPrivateKey(createPrivateKey(key))) throw new Error();
+    return { key, cert, id: identityCode(cert) };
+  } catch {
+    throw new Error('无法从联机脚本读取设备身份，请确认原文件仍在首次运行的位置');
+  }
 }
 
 function port(value) {

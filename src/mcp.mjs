@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { callLocal } from './local.mjs';
 
 export async function startMcp() {
-  const mcp = new McpServer({ name: 'lattice', version: '0.1.0' });
+  const mcp = new McpServer({ name: 'lattci-chat', version: '0.1.1' });
   const transport = new StdioServerTransport();
   const id = randomUUID();
   const body = z.string().min(1).max(16000);
