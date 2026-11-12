@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, createPrivateKey, randomBytes, X509Certificate } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -10,6 +10,18 @@ export function identityCode(certificate) {
   return createHash('sha256').update(publicKey).digest('hex');
 }
 export const validIdentity = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+
+export function deviceDeclaration({ id, name, description }) {
+  return { id, name, 'lattci-code': id, description: description ?? null };
+}
+
+export function validateDescription(value) {
+  const description = typeof value === 'string' ? value.trim() : '';
+  if (!description || [...description].length > 2000) {
+    throw new Error('请填写能力和职权描述（1 至 2000 字符）');
+  }
+  return description;
+}
 
 export function initProfile(directory, options) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -24,8 +36,9 @@ export function initProfile(directory, options) {
   const bind = options.bind || '127.0.0.1';
   const name = options.name || 'Lattice';
   if (name.length > 80) throw new Error('名称最多 80 字符');
-  if (options.workspace && !isAbsolute(options.codex || '')) {
-    throw new Error('启用自动执行时请用 --codex 指定可执行文件的绝对路径');
+  const description = options.description === undefined ? null : validateDescription(options.description);
+  if (options.codex && !isAbsolute(options.codex)) {
+    throw new Error('请用 --codex 指定可执行文件的绝对路径');
   }
   const identitySource = options['identity-source'] ? resolve(options['identity-source']) : null;
   let identityId;
@@ -44,25 +57,44 @@ export function initProfile(directory, options) {
     chmodSync(keyPath, 0o600);
   }
   writeFileSync(settings, JSON.stringify({
-    localPort, peerPort, bind, name, token: randomBytes(32).toString('hex'),
+    localPort, peerPort, bind, name, description, token: randomBytes(32).toString('hex'),
     identitySource, identityId,
-    codex: options.codex || 'codex',
-    workspace: options.workspace ? resolve(options.workspace) : null,
-    sandbox: options['workspace-write'] ? 'workspace-write' : 'read-only',
+    codex: options.codex || null,
+    workspace: options.workspace ? resolve(options.workspace) : join(directory, 'workspace'),
   }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
   return readProfile(directory);
 }
 
+export function readSettings(directory) {
+  return JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'));
+}
+
+export function updateDescription(profile, value) {
+  const description = validateDescription(value);
+  const { directory } = profile;
+  const settings = readSettings(directory);
+  const temporary = join(directory, 'settings.' + randomBytes(12).toString('hex') + '.tmp');
+  try {
+    writeFileSync(temporary, JSON.stringify({ ...settings, description }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, join(directory, 'settings.json'));
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  return deviceDeclaration({ ...profile, description });
+}
+
 export function readProfile(directory) {
-  const settings = JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'));
+  const settings = readSettings(directory);
+  const workspace = settings.workspace || join(directory, 'workspace');
+  const profile = { ...settings, directory, workspace };
   if (settings.identitySource) {
     const identity = embeddedIdentity(settings.identitySource);
     if (identity.id !== settings.identityId) throw new Error('联机脚本中的设备身份已变更');
-    return { ...settings, directory, ...identity };
+    return { ...profile, ...identity };
   }
   const key = readFileSync(join(directory, 'identity.key'));
   const cert = readFileSync(join(directory, 'identity.crt'));
-  return { ...settings, directory, key, cert, id: identityCode(cert) };
+  return { ...profile, key, cert, id: identityCode(cert) };
 }
 
 function embeddedIdentity(path) {

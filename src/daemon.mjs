@@ -1,8 +1,9 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { executeRequest, prepareExecutor } from './executor.mjs';
 import { openStore } from './store.mjs';
-import { peerUrl, validIdentity } from './profile.mjs';
+import { deviceDeclaration, peerUrl, readSettings, updateDescription, validateDescription, validIdentity } from './profile.mjs';
 import { maxBody, startTransport } from './transport.mjs';
 
 const maxRequest = 96 * 1024;
@@ -10,6 +11,7 @@ const leaseDuration = 12000;
 const allowedKinds = ['notice', 'request'];
 
 export async function serve(profile) {
+  const executor = prepareExecutor(profile);
   const db = openStore(profile);
   const findPeer = db.prepare('SELECT * FROM peers WHERE id = ?');
   const findMessage = db.prepare('SELECT * FROM messages WHERE id = ?');
@@ -17,7 +19,8 @@ export async function serve(profile) {
   const save = db.prepare(`INSERT INTO messages (id, peer, direction, kind, body, replyTo, createdAt, state)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
   const sessions = new Map();
-  let activeChild;
+  const fileReviews = new Map();
+  let activeTask;
   let stopping = false;
   let reminderInProgress = false;
   let remindAfter = 0;
@@ -54,31 +57,21 @@ export async function serve(profile) {
 
   function runRequest(message) {
     update.run('running', message.id);
-    const child = spawn(profile.codex, [
-      '--ask-for-approval', 'never', 'exec', '--ignore-user-config', '--skip-git-repo-check', '--ephemeral',
-      '--sandbox', profile.sandbox || 'read-only', '-C', profile.workspace, '-',
-    ], { cwd: profile.workspace, stdio: ['pipe', 'pipe', 'ignore'] });
-    activeChild = child;
-    let output = '';
-    let error;
-    const timeout = setTimeout(() => {
-      error = new Error('任务执行超时');
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 3000).unref();
-    }, 600000);
-    child.stdout.on('data', (data) => { output = (output + data.toString()).slice(-maxBody); });
-    child.on('error', (cause) => { error = cause; });
-    child.stdin.on('error', () => {});
-    child.stdin.end(message.body);
-    child.once('close', (code) => {
-      clearTimeout(timeout);
-      activeChild = undefined;
-      if (stopping) return;
-      if (error || code !== 0) {
-        finish(message, 'failed', error ? 'Agent 执行失败：' + error.message : 'Agent 退出码：' + code);
-      } else {
-        finish(message, 'completed', output || '任务完成');
+    activeTask = executeRequest(executor, message.body, (paths, reason, respond) => {
+      const id = randomUUID();
+      const peer = findPeer.get(message.peer);
+      fileReviews.set(id, { id, messageId: message.id, from: peer?.name, paths, reason, respond });
+      if (process.platform === 'darwin') {
+        const notifier = spawn('/usr/bin/osascript', ['-e',
+          'display notification "有一项工作目录外写入待审批。请查看晶格状态。" with title "晶格 Lattice"'], { stdio: 'ignore' });
+        notifier.on('error', () => {});
       }
+    });
+    void activeTask.result.then(({ state, output }) => {
+      activeTask = undefined;
+      fileReviews.clear();
+      if (stopping) return;
+      finish(message, state, output);
       tick();
     });
   }
@@ -111,7 +104,7 @@ export async function serve(profile) {
     connectedAgent = sessions.size > 0;
     if (!connectedAgent) return;
     remind();
-    if (activeChild || !profile.workspace) return;
+    if (activeTask) return;
     const message = db.prepare(`SELECT * FROM messages WHERE direction = 'in' AND kind = 'request'
       AND state IN ('queued', 'approved') ORDER BY createdAt, rowid LIMIT 1`).get();
     if (!message) return;
@@ -122,23 +115,35 @@ export async function serve(profile) {
     runRequest(message);
   }
 
+  function pairDevice({ id, name, description, address }) {
+    if (!validIdentity(id) || id === profile.id || typeof name !== 'string' || !name.trim() || name.length > 80) {
+      throw new Error('对端名称或 256 位身份码无效');
+    }
+    const existing = findPeer.get(id);
+    const declaredDescription = existing && description === undefined
+      ? existing.description : validateDescription(description);
+    const endpoint = existing && address === undefined ? existing.address : peerUrl(address);
+    db.prepare(`INSERT INTO peers (id, name, description, address, permission) VALUES (?, ?, ?, ?, 'none')
+      ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description, address = excluded.address`)
+      .run(id, name, declaredDescription, endpoint);
+    const peer = findPeer.get(id);
+    transport.connect(peer);
+    return { ...deviceDeclaration(peer), permission: peer.permission };
+  }
+
   const handlers = {
     status: () => ({
-      id: profile.id, name: profile.name, agentOnline: connectedAgent,
-      executionEnabled: Boolean(profile.workspace), peerPort: profile.peerPort, bind: profile.bind,
-      peers: db.prepare('SELECT id, name, address, permission FROM peers ORDER BY name').all()
-        .map((peer) => ({ ...peer, ...transport.status(peer.id) })),
+      ...deviceDeclaration({ ...profile, description: readSettings(profile.directory).description }),
+      agentOnline: connectedAgent,
+      executionEnabled: true, workspace: executor.workspace, pendingFileReviews: fileReviews.size,
+      peerPort: profile.peerPort, bind: profile.bind,
+      peers: db.prepare('SELECT id, name, description, address, permission FROM peers ORDER BY name').all()
+        .map((peer) => ({ ...deviceDeclaration(peer), address: peer.address, permission: peer.permission,
+          ...transport.status(peer.id) })),
     }),
-    pair: ({ id, name, address }) => {
-      if (!validIdentity(id) || id === profile.id || typeof name !== 'string' || !name.trim() || name.length > 80) {
-        throw new Error('对端名称或 256 位身份码无效');
-      }
-      db.prepare(`INSERT INTO peers (id, name, address, permission) VALUES (?, ?, ?, 'none')
-        ON CONFLICT(id) DO UPDATE SET name = excluded.name, address = excluded.address`)
-        .run(id, name, peerUrl(address));
-      transport.connect(findPeer.get(id));
-      return { id, permission: findPeer.get(id).permission };
-    },
+    update_description: ({ description }) => updateDescription(profile, description),
+    pair: pairDevice,
+    pair_with_declaration: pairDevice,
     permission: ({ id, level }) => {
       if (!['none', 'full'].includes(level) || !findPeer.get(id ?? '')) throw new Error('发送方或权限无效');
       db.prepare('UPDATE peers SET permission = ? WHERE id = ?').run(level, id);
@@ -169,6 +174,14 @@ export async function serve(profile) {
       if (!message) throw new Error('消息不存在');
       const replies = db.prepare("SELECT * FROM messages WHERE replyTo = ? ORDER BY rowid").all(id);
       return { message, replies };
+    },
+    file_reviews: () => [...fileReviews.values()].map(({ respond, ...review }) => review),
+    file_review: ({ id, approve }) => {
+      const review = fileReviews.get(id);
+      if (!review || typeof approve !== 'boolean') throw new Error('写入审批已结束或不存在');
+      fileReviews.delete(id);
+      review.respond(approve);
+      return { id, approved: approve };
     },
     decision: ({ id, approve }) => {
       const message = findMessage.get(id ?? '');
@@ -228,7 +241,7 @@ export async function serve(profile) {
     if (stopping) return;
     stopping = true;
     clearInterval(interval);
-    activeChild?.kill('SIGTERM');
+    activeTask?.stop();
     await Promise.all([transport.stop(), new Promise((resolve) => {
       control.close(resolve);
       control.closeAllConnections();
@@ -239,6 +252,7 @@ export async function serve(profile) {
   try {
     await listen(control, profile.localPort, '127.0.0.1');
     await listen(transport.server, profile.peerPort, profile.bind);
+    db.prepare("UPDATE messages SET state = 'interrupted' WHERE direction = 'in' AND state = 'running'").run();
   } catch (error) {
     await stop();
     throw error;

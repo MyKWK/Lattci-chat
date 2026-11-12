@@ -1,4 +1,4 @@
-# Lattci-chat 0.1.1（晶格）
+# Lattci-chat 0.1.2（晶格）
 
 两台已配对的电脑通过加密 WebSocket 直接收发通知和请求。Codex 插件提供 MCP 工具。本地晶格进程独立收信，Codex 退出时收到的消息保存在本机，插件重新连上后可查看。macOS 上可由系统在登录时启动晶格。
 
@@ -16,10 +16,12 @@ node plugins/lattci-chat/lattice.cjs --help
 
 ## 首次配对
 
+以下命令使用当前源码构建的运行包。已安装过的设备请更新 Codex 插件。macOS 上已注册后台服务的设备用新版 `lattice.cjs` 再执行一次 `service enable`，以更新后台程序。手动运行 `serve` 的设备用新版程序重启。
+
 1. 选一台可被另一台访问的电脑 A，在 A 上把 `LISTEN_IP` 换成它的局域网或 VPN 地址。
 
    ```sh
-   node plugins/lattci-chat/lattice.cjs init --name A --bind LISTEN_IP
+   node plugins/lattci-chat/lattice.cjs init --name A --description '可整理项目资料，负责汇总进度。' --bind LISTEN_IP
    node plugins/lattci-chat/lattice.cjs service enable
    node plugins/lattci-chat/lattice.cjs identity
    ```
@@ -27,19 +29,23 @@ node plugins/lattci-chat/lattice.cjs --help
 2. B 可以用默认监听地址，主动连接 A。
 
    ```sh
-   node plugins/lattci-chat/lattice.cjs init --name B
+   node plugins/lattci-chat/lattice.cjs init --name B --description '可审阅测试记录，负责反馈验证结果。'
    node plugins/lattci-chat/lattice.cjs service enable
    node plugins/lattci-chat/lattice.cjs identity
    ```
 
-3. 双方交换 `identity` 输出的 64 位十六进制身份码。先在 A 信任 B，再在 B 信任 A 并填写 A 的可达地址。
+3. 双方交换 `identity` 输出的设备声明。先在 A 登记 B，再在 B 登记 A 并填写 A 的可达地址。
+
+   - `name` 是设备向好友展示的名称。
+   - `lattci-code` 是原有的 64 位十六进制公开身份码，和输出中的 `id` 相同。
+   - `description` 说明这台机器能做什么、可以做什么、负责什么。首次登记好友须填写，最多 2000 字符。
 
    ```sh
    # 在 A
-   node plugins/lattci-chat/lattice.cjs pair B_ID --name B
+   node plugins/lattci-chat/lattice.cjs pair B_CODE --name B --description '可审阅测试记录，负责反馈验证结果。'
 
    # 在 B
-   node plugins/lattci-chat/lattice.cjs pair A_ID --name A --address wss://LISTEN_IP:48452
+   node plugins/lattci-chat/lattice.cjs pair A_CODE --name A --description '可整理项目资料，负责汇总进度。' --address wss://LISTEN_IP:48452
 
    # 两边都可以查看连接
    node plugins/lattci-chat/lattice.cjs status
@@ -47,7 +53,29 @@ node plugins/lattci-chat/lattice.cjs --help
 
 握手后同一条连接可双向传输。新配对默认「无权限」，通知照常显示，请求由接收方运行 `approve 消息编号` 或 `reject 消息编号`。要为某台设备开启直接处理，在接收端运行 `permission 对方身份码 full`。可用 `permission 对方身份码 none` 收回直接处理权限。
 
-如果希望晶格自动启动本机 Codex，首次 `init` 时追加 `--workspace 项目绝对路径 --codex Codex可执行文件绝对路径`。默认只读，需要允许在工作区写入时追加 `--workspace-write`。Agent 在线指插件 MCP 会话已接入晶格。请求可交给新的本机 Codex 执行，也可由接收方在插件中回复已授权请求。
+### 维护设备声明
+
+可在命令行修改本机的描述，或在 Codex 里请晶格更新本机的能力和职权声明。`identity` 和 `status` 会立即显示新版描述。更新后把 `identity` 输出交给好友，由对方用原晶格码重新执行 `pair` 更新记录。
+
+```sh
+node plugins/lattci-chat/lattice.cjs profile --description '可审阅测试记录，并负责汇总缺陷。'
+node plugins/lattci-chat/lattice.cjs identity
+```
+
+升级后，原来的好友记录会继续使用，未填写的描述显示为 `null`。重新执行 `pair` 可补填描述，省略 `--address` 时沿用已登记的地址。实际请求授权仍由接收方通过 `permission` 管理。
+
+### 执行任务和审批写入
+
+晶格默认使用 `~/.lattice/workspace` 执行已授权的任务。如果设置了 `LATTICE_HOME`，专用目录是该目录下的 `workspace`。已有的自定义目录继续使用。首次初始化也可用 `--workspace 目录` 指定。自动执行需要本机 Codex CLI 支持权限配置和 App Server 的路径权限审批。找不到可执行文件时，首次初始化可用 `--codex 可执行文件绝对路径` 指定。
+
+任务可以读取、写入和删除专用工作目录内的文件。目录外普通文件默认只读，写入和删除需要本机使用者批准。好友的 `full` 权限只免除任务请求审批。Agent 在线指插件 MCP 会话已接入晶格。
+
+当任务申请在目录外写入时，用本机终端查看申请中的路径与理由。批准仅对本次任务中列出的路径生效。拒绝或未批准时，目录外仍保持只读。
+
+```sh
+node plugins/lattci-chat/lattice.cjs reviews
+node plugins/lattci-chat/lattice.cjs review APPROVAL_ID
+```
 
 打开新的 Codex 会话后，可以让晶格查看连接、发送通知或请求、读取收件箱、查询消息和回复。也可用命令行验证：
 
